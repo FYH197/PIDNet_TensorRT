@@ -32,6 +32,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--num-classes", type=int, default=15)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--dad-enabled", action="store_true", help="Enable stage-4 DAD; must match checkpoint.")
+    parser.add_argument("--dad-channels", type=int, default=16, help="DAD projection channels; must match checkpoint.")
     return parser.parse_args()
 
 
@@ -67,7 +69,9 @@ def main() -> None:
     args = parse_args()
     device = torch.device(args.device)
     model = models.pidnet.get_pred_model(
-        "pidnet-s", args.num_classes, in_channels=4
+        # Before DAD: "pidnet-s", args.num_classes, in_channels=4
+        "pidnet-s", args.num_classes, in_channels=4,
+        dad_enabled=args.dad_enabled, dad_channels=args.dad_channels
     )
     matched, skipped, _ = load_checkpoint_weights(model, args.checkpoint.resolve())
     model.to(device).eval()

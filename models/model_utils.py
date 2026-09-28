@@ -312,6 +312,46 @@ class PagFM(nn.Module):
         
         return x
     
+
+class DiscrepancyAwareDerivative(nn.Module):
+    """Signed, zero-start residual from pre-PagFM stage-4 P/I features.
+
+    Normalization reduces scale mismatch; discrepancy is not an error label.
+    The output projection is zero-initialized, so its upstream layers receive
+    nonzero gradients only after that projection begins to learn.
+    """
+
+    def __init__(self, p_channels, i_channels, d_channels, mid_channels=16):
+        super().__init__()
+        if isinstance(mid_channels, bool) or not isinstance(mid_channels, int) or mid_channels <= 0:
+            raise ValueError('DAD channels must be a positive integer')
+        self.p_proj = nn.Sequential(
+            nn.Conv2d(p_channels, mid_channels, 1, bias=False),
+            nn.BatchNorm2d(mid_channels, momentum=bn_mom))
+        self.i_proj = nn.Sequential(
+            nn.Conv2d(i_channels, mid_channels, 1, bias=False),
+            nn.BatchNorm2d(mid_channels, momentum=bn_mom))
+        self.refine = nn.Sequential(
+            nn.Conv2d(mid_channels, mid_channels, 3, padding=1,
+                      groups=mid_channels, bias=False),
+            nn.BatchNorm2d(mid_channels, momentum=bn_mom),
+            nn.ReLU(inplace=False))
+        self.out_proj = nn.Conv2d(mid_channels, d_channels, 1, bias=False)
+        for layer in self.modules():
+            if isinstance(layer, nn.Conv2d):
+                nn.init.kaiming_normal_(layer.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(layer, nn.BatchNorm2d):
+                nn.init.ones_(layer.weight)
+                nn.init.zeros_(layer.bias)
+        nn.init.zeros_(self.out_proj.weight)
+
+    def forward(self, p, i):
+        p_aligned = self.p_proj(p)
+        i_aligned = F.interpolate(self.i_proj(i), size=p.shape[-2:],
+                                  mode='bilinear', align_corners=False)
+        difference = torch.abs(p_aligned - i_aligned)
+        return self.out_proj(self.refine(difference))
+
 class Light_Bag(nn.Module):
     def __init__(self, in_channels, out_channels, BatchNorm=nn.BatchNorm2d):
         super(Light_Bag, self).__init__()

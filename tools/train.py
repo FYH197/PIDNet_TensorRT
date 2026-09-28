@@ -193,6 +193,7 @@ def main():
         config.MODEL.PRETRAINED if config.MODEL.PRETRAINED else 'random initialization',
     )
     logger.info('Model input channels: %d', config.MODEL.IN_CHANNELS)
+    logger.info('DAD enabled: %s; channels: %d', config.MODEL.DAD_ENABLED, config.MODEL.DAD_CHANNELS)
     logger.info(
         'Validation schedule: every %d epoch(s)',
         max(1, int(config.TEST.VAL_INTERVAL)),
@@ -423,6 +424,8 @@ def main():
         'status': 'completed',
         'model': config.MODEL.NAME,
         'input_channels': int(config.MODEL.IN_CHANNELS),
+        'dad_enabled': bool(config.MODEL.DAD_ENABLED),
+        'dad_channels': int(config.MODEL.DAD_CHANNELS),
         'dataset': config.DATASET.DATASET,
         'train_set': config.DATASET.TRAIN_SET,
         'validation_set': config.DATASET.TEST_SET,

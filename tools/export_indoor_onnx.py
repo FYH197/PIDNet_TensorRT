@@ -26,6 +26,8 @@ def parse_args():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", choices=["cuda", "cpu"])
     parser.add_argument("--check-only", action="store_true", help="Load weights and run one forward pass without exporting.")
     parser.add_argument("--skip-onnx-check", action="store_true", help="Skip onnx.checker validation after export.")
+    parser.add_argument("--dad-enabled", action="store_true", help="Enable stage-4 DAD; must match checkpoint.")
+    parser.add_argument("--dad-channels", type=int, default=16, help="DAD projection channels; must match checkpoint.")
     return parser.parse_args()
 
 
@@ -52,6 +54,19 @@ def load_checkpoint_weights(model, checkpoint_path):
 
     if not matched:
         raise RuntimeError(f"No checkpoint tensors matched model '{type(model).__name__}'.")
+
+    # Fail closed for the new architecture: never silently drop DAD weights or
+    # run a DAD checkpoint with an uninitialized/mismatched discrepancy module.
+    expected_dad = {k for k in model_state if k.startswith("dad.")}
+    checkpoint_dad = {normalize_key(k) for k in state_dict if normalize_key(k).startswith("dad.")}
+    loaded_dad = expected_dad.intersection(matched)
+    if expected_dad != checkpoint_dad or loaded_dad != expected_dad:
+        raise RuntimeError("DAD checkpoint mismatch: --dad-enabled and --dad-channels must match training; all DAD tensors are required.")
+
+    if expected_dad:
+        missing = sorted(set(model_state) - set(matched))
+        if missing:
+            raise RuntimeError(f"Incomplete DAD inference checkpoint: missing or incompatible tensors: {missing}")
 
     model_state.update(matched)
     model.load_state_dict(model_state, strict=False)
@@ -80,7 +95,9 @@ def main():
     # RGB-only construction kept for reference:
     # model = models.pidnet.get_pred_model(args.arch, args.num_classes)
     model = models.pidnet.get_pred_model(
-        args.arch, args.num_classes, in_channels=args.in_channels
+        # Before DAD: args.arch, args.num_classes, in_channels=args.in_channels
+        args.arch, args.num_classes, in_channels=args.in_channels,
+        dad_enabled=args.dad_enabled, dad_channels=args.dad_channels
     )
     matched, skipped, head_shape = load_checkpoint_weights(model, checkpoint_path)
     model.to(device).eval()

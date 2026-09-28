@@ -1,0 +1,71 @@
+# PIDNet-S RGB-D training config for the active SUNRGBD-15 split.
+# Input order is RGB plus decoded depth_mm / 8000 as the fourth channel.
+CUDNN:
+  BENCHMARK: true
+  DETERMINISTIC: false
+  ENABLED: true
+GPUS: (0,)
+OUTPUT_DIR: 'f:/PIDnet_RT/output'
+LOG_DIR: 'f:/PIDnet_RT/log'
+WORKERS: 2
+PRINT_FREQ: 10
+
+DATASET:
+  DATASET: indoor
+  # Previous project-local path: f:/PIDnet_RT/PIDNet_TensorRT/data/indoor/
+  ROOT: 'f:/SUNRGBD_Data/processed/'
+  TRAIN_SET: 'train_rgbd.txt'
+  TEST_SET: 'val_rgbd.txt'
+  NUM_CLASSES: 15
+  DEPTH_SCALE_MM: 8000.0
+  DEPTH_MEAN: 0.29934640639806365
+  DEPTH_STD: 0.158218660916179
+
+MODEL:
+  NAME: pidnet_s
+  IN_CHANNELS: 4
+  DAD_ENABLED: true
+  DAD_CHANNELS: 16
+  NUM_OUTPUTS: 2
+  PRETRAINED: 'f:/PIDnet_RT/PIDNet_TensorRT/pretrained_models/imagenet/PIDNet_S_ImageNet.pth.tar'
+
+LOSS:
+  USE_OHEM: true
+  USE_BOUNDARY: true
+  CLASS_BALANCE: false
+  OHEMTHRES: 0.9
+  OHEMKEEP: 131072
+  BALANCE_WEIGHTS: [0.4, 1.0]
+  SB_WEIGHTS: 1.0
+
+TRAIN:
+  IMAGE_SIZE:
+  - 640
+  - 480
+  BASE_SIZE: 640
+  BATCH_SIZE_PER_GPU: 44
+  SHUFFLE: true
+  BEGIN_EPOCH: 0
+  END_EPOCH: 300
+  RESUME: false
+  OPTIMIZER: sgd
+  LR: 0.01
+  WD: 0.0005
+  MOMENTUM: 0.9
+  NESTEROV: false
+  FLIP: true
+  MULTI_SCALE: true
+  IGNORE_LABEL: 255
+  SCALE_FACTOR: 16
+
+TEST:
+  IMAGE_SIZE:
+  - 640
+  - 480
+  BASE_SIZE: 640
+  BATCH_SIZE_PER_GPU: 1
+  VAL_INTERVAL: 5
+  FLIP_TEST: false
+  MULTI_SCALE: false
+  MODEL_FILE: ''
+  OUTPUT_INDEX: 1

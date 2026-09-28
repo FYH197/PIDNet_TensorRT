@@ -6,7 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import time
 import os
-from .model_utils import BasicBlock, Bottleneck, segmenthead, DAPPM, PAPPM, PagFM, Bag, Light_Bag
+# Before DAD: from .model_utils import BasicBlock, Bottleneck, segmenthead, DAPPM, PAPPM, PagFM, Bag, Light_Bag
+from .model_utils import DiscrepancyAwareDerivative, BasicBlock, Bottleneck, segmenthead, DAPPM, PAPPM, PagFM, Bag, Light_Bag
 import logging
 
 BatchNorm2d = nn.BatchNorm2d
@@ -125,10 +126,15 @@ class PIDNet(nn.Module):
     # RGB-only signature kept for reference:
     # def __init__(self, m=2, n=3, num_classes=19, planes=64,
     #              ppm_planes=96, head_planes=128, augment=True):
+    # Before DAD:
+    # def __init__(self, m=2, n=3, num_classes=19, planes=64, ppm_planes=96,
+    #              head_planes=128, augment=True, in_channels=3):
     def __init__(self, m=2, n=3, num_classes=19, planes=64, ppm_planes=96,
-                 head_planes=128, augment=True, in_channels=3):
+                 head_planes=128, augment=True, in_channels=3, dad_enabled=False, dad_channels=16):
         super(PIDNet, self).__init__()
         self.augment = augment
+        self.dad_enabled = bool(dad_enabled)
+        self.dad_channels = dad_channels
         
         # I Branch
         self.conv1 =  nn.Sequential(
@@ -212,6 +218,13 @@ class PIDNet(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
 
+        # Construct AFTER original initialization, without advancing its RNG stream.
+        # This preserves baseline weights and subsequent RNG state for paired seeds.
+        if self.dad_enabled:
+            with torch.random.fork_rng(devices=[]):
+                self.dad = DiscrepancyAwareDerivative(
+                    planes * 2, planes * 8, planes * 2, dad_channels)
+
     def _make_layer(self, block, inplanes, planes, blocks, stride=1):
         downsample = None
         if stride != 1 or inplanes != planes * block.expansion:
@@ -274,12 +287,19 @@ class PIDNet(nn.Module):
         x_ = self.layer4_(self.relu(x_))
         x_d = self.layer4_d(self.relu(x_d))
         
+        # Capture discrepancy before this stage's P/I fusion.
+        if self.dad_enabled:
+            dad_residual = self.dad(x_, x)
         x_ = self.pag4(x_, self.compression4(x))
         x_d = x_d + F.interpolate(
                         self.diff4(x),
                         size=[height_output, width_output],
                         mode='bilinear', align_corners=algc)
         torch.cuda.nvtx.range_pop()
+
+        # Inject before temp_d: both boundary supervision and final fusion see DAD.
+        if self.dad_enabled:
+            x_d = x_d + dad_residual
 
         torch.cuda.nvtx.range_push("stage4")
         if self.augment:
@@ -306,18 +326,23 @@ class PIDNet(nn.Module):
 
 def get_seg_model(cfg, imgnet_pretrained):
     in_channels = getattr(cfg.MODEL, 'IN_CHANNELS', 3)
+    dad_enabled = getattr(cfg.MODEL, 'DAD_ENABLED', False)
+    dad_channels = getattr(cfg.MODEL, 'DAD_CHANNELS', 16)
     if 's' in cfg.MODEL.NAME:
         # RGB-only construction kept for reference:
         # model = PIDNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=32, ppm_planes=96, head_planes=128, augment=True)
-        model = PIDNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=32, ppm_planes=96, head_planes=128, augment=True, in_channels=in_channels)
+        # Before DAD: model = PIDNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=32, ppm_planes=96, head_planes=128, augment=True, in_channels=in_channels)
+        model = PIDNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=32, ppm_planes=96, head_planes=128, augment=True, in_channels=in_channels, dad_enabled=dad_enabled, dad_channels=dad_channels)
     elif 'm' in cfg.MODEL.NAME:
         # RGB-only construction kept for reference:
         # model = PIDNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, ppm_planes=96, head_planes=128, augment=True)
-        model = PIDNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, ppm_planes=96, head_planes=128, augment=True, in_channels=in_channels)
+        # Before DAD: model = PIDNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, ppm_planes=96, head_planes=128, augment=True, in_channels=in_channels)
+        model = PIDNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, ppm_planes=96, head_planes=128, augment=True, in_channels=in_channels, dad_enabled=dad_enabled, dad_channels=dad_channels)
     else:
         # RGB-only construction kept for reference:
         # model = PIDNet(m=3, n=4, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, ppm_planes=112, head_planes=256, augment=True)
-        model = PIDNet(m=3, n=4, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, ppm_planes=112, head_planes=256, augment=True, in_channels=in_channels)
+        # Before DAD: model = PIDNet(m=3, n=4, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, ppm_planes=112, head_planes=256, augment=True, in_channels=in_channels)
+        model = PIDNet(m=3, n=4, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, ppm_planes=112, head_planes=256, augment=True, in_channels=in_channels, dad_enabled=dad_enabled, dad_channels=dad_channels)
 
     if cfg.MODEL.PRETRAINED == 'torchvision://resnet18':
         return load_imagenet_backbone(model)
@@ -363,17 +388,21 @@ def get_seg_model(cfg, imgnet_pretrained):
 
 # RGB-only signature kept for reference:
 # def get_pred_model(name, num_classes):
-def get_pred_model(name, num_classes, in_channels=3):
+# Previous signature: def get_pred_model(name, num_classes, in_channels=3):
+def get_pred_model(name, num_classes, in_channels=3, dad_enabled=False, dad_channels=16):
     # RGB-only calls can omit in_channels; RGB-D callers pass in_channels=4.
     if 's' in name:
         # model = PIDNet(m=2, n=3, num_classes=num_classes, planes=32, ppm_planes=96, head_planes=128, augment=False)
-        model = PIDNet(m=2, n=3, num_classes=num_classes, planes=32, ppm_planes=96, head_planes=128, augment=False, in_channels=in_channels)
+        # Before DAD: model = PIDNet(m=2, n=3, num_classes=num_classes, planes=32, ppm_planes=96, head_planes=128, augment=False, in_channels=in_channels)
+        model = PIDNet(m=2, n=3, num_classes=num_classes, planes=32, ppm_planes=96, head_planes=128, augment=False, in_channels=in_channels, dad_enabled=dad_enabled, dad_channels=dad_channels)
     elif 'm' in name:
         # model = PIDNet(m=2, n=3, num_classes=num_classes, planes=64, ppm_planes=96, head_planes=128, augment=False)
-        model = PIDNet(m=2, n=3, num_classes=num_classes, planes=64, ppm_planes=96, head_planes=128, augment=False, in_channels=in_channels)
+        # Before DAD: model = PIDNet(m=2, n=3, num_classes=num_classes, planes=64, ppm_planes=96, head_planes=128, augment=False, in_channels=in_channels)
+        model = PIDNet(m=2, n=3, num_classes=num_classes, planes=64, ppm_planes=96, head_planes=128, augment=False, in_channels=in_channels, dad_enabled=dad_enabled, dad_channels=dad_channels)
     else:
         # model = PIDNet(m=3, n=4, num_classes=num_classes, planes=64, ppm_planes=112, head_planes=256, augment=False)
-        model = PIDNet(m=3, n=4, num_classes=num_classes, planes=64, ppm_planes=112, head_planes=256, augment=False, in_channels=in_channels)
+        # Before DAD: model = PIDNet(m=3, n=4, num_classes=num_classes, planes=64, ppm_planes=112, head_planes=256, augment=False, in_channels=in_channels)
+        model = PIDNet(m=3, n=4, num_classes=num_classes, planes=64, ppm_planes=112, head_planes=256, augment=False, in_channels=in_channels, dad_enabled=dad_enabled, dad_channels=dad_channels)
     
     return model
 
@@ -424,5 +453,3 @@ if __name__ == '__main__':
     
     
     
-
-

@@ -34,6 +34,9 @@ _C.MODEL.NUM_OUTPUTS = 2
 # RGB-only models historically used an implicit three-channel stem.
 # _C.MODEL.IN_CHANNELS = 3
 _C.MODEL.IN_CHANNELS = 3
+# Opt-in stage-4 discrepancy residual; original baseline stays unchanged.
+_C.MODEL.DAD_ENABLED = False
+_C.MODEL.DAD_CHANNELS = 16
 
 
 _C.LOSS = CN()
@@ -111,4 +114,3 @@ if __name__ == '__main__':
     import sys
     with open(sys.argv[1], 'w') as f:
         print(_C, file=f)
-

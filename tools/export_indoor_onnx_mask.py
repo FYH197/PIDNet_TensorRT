@@ -46,6 +46,8 @@ def parse_args():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", choices=["cuda", "cpu"])
     parser.add_argument("--fast-mask", action="store_true", help="Argmax at 60x80 then resize mask; faster but blockier.")
     parser.add_argument("--skip-onnx-check", action="store_true", help="Skip onnx.checker validation after export.")
+    parser.add_argument("--dad-enabled", action="store_true", help="Enable stage-4 DAD; must match checkpoint.")
+    parser.add_argument("--dad-channels", type=int, default=16, help="DAD projection channels; must match checkpoint.")
     return parser.parse_args()
 
 
@@ -64,7 +66,9 @@ def main():
     # RGB-only construction kept for reference:
     # model = models.pidnet.get_pred_model(args.arch, args.num_classes)
     model = models.pidnet.get_pred_model(
-        args.arch, args.num_classes, in_channels=args.in_channels
+        # Before DAD: args.arch, args.num_classes, in_channels=args.in_channels
+        args.arch, args.num_classes, in_channels=args.in_channels,
+        dad_enabled=args.dad_enabled, dad_channels=args.dad_channels
     )
     matched, skipped, head_shape = load_checkpoint_weights(model, checkpoint_path)
     wrapped = PidnetMaskWrapper(model, output_size=(args.height, args.width), fast_mask=args.fast_mask)
