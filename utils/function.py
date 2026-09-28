@@ -24,16 +24,29 @@ def train(config, epoch, num_epoch, epoch_iters, base_lr,
     model.train()
 
     batch_time = AverageMeter()
+    data_time = AverageMeter()
+    compute_time = AverageMeter()
     ave_loss = AverageMeter()
     ave_acc  = AverageMeter()
     avg_sem_loss = AverageMeter()
     avg_bce_loss = AverageMeter()
-    tic = time.time()
+    end = time.time()
     cur_iters = epoch*epoch_iters
     writer = writer_dict['writer']
     global_steps = writer_dict['train_global_steps']
 
-    for i_iter, batch in enumerate(trainloader, 0):
+    progress = tqdm(
+        enumerate(trainloader, 0),
+        total=len(trainloader),
+        desc='Train {}/{}'.format(epoch + 1, num_epoch),
+        dynamic_ncols=True,
+        leave=True,
+    )
+
+    for i_iter, batch in progress:
+        data_time.update(time.time() - end)
+
+        compute_start = time.time()
         images, labels, bd_gts, _, _ = batch
         images = images.cuda()
         labels = labels.long().cuda()
@@ -48,9 +61,9 @@ def train(config, epoch, num_epoch, epoch_iters, base_lr,
         loss.backward()
         optimizer.step()
 
-        # measure elapsed time
-        batch_time.update(time.time() - tic)
-        tic = time.time()
+        compute_time.update(time.time() - compute_start)
+        batch_time.update(time.time() - end)
+        end = time.time()
 
         # update average loss
         ave_loss.update(loss.item())
@@ -63,11 +76,21 @@ def train(config, epoch, num_epoch, epoch_iters, base_lr,
                                   num_iters,
                                   i_iter+cur_iters)
 
+        progress.set_postfix({
+            'lr': '{:.2e}'.format(lr),
+            'loss': '{:.4f}'.format(ave_loss.average()),
+            'acc': '{:.4f}'.format(ave_acc.average()),
+            'data': '{:.3f}'.format(data_time.value()),
+            'compute': '{:.3f}'.format(compute_time.value()),
+            's/it': '{:.3f}'.format(batch_time.value()),
+        })
+
         if i_iter % config.PRINT_FREQ == 0:
-            msg = 'Epoch: [{}/{}] Iter:[{}/{}], Time: {:.2f}, ' \
+            msg = 'Epoch: [{}/{}] Iter:[{}/{}], Time: {:.2f}, Data: {:.2f}, Compute: {:.2f}, ' \
                   'lr: {}, Loss: {:.6f}, Acc:{:.6f}, Semantic loss: {:.6f}, BCE loss: {:.6f}, SB loss: {:.6f}' .format(
                       epoch, num_epoch, i_iter, epoch_iters,
-                      batch_time.average(), [x['lr'] for x in optimizer.param_groups], ave_loss.average(),
+                      batch_time.average(), data_time.average(), compute_time.average(),
+                      [x['lr'] for x in optimizer.param_groups], ave_loss.average(),
                       ave_acc.average(), avg_sem_loss.average(), avg_bce_loss.average(),ave_loss.average()-avg_sem_loss.average()-avg_bce_loss.average())
             logging.info(msg)
 
@@ -77,11 +100,18 @@ def train(config, epoch, num_epoch, epoch_iters, base_lr,
 def validate(config, testloader, model, writer_dict):
     model.eval()
     ave_loss = AverageMeter()
-    nums = config.MODEL.NUM_OUTPUTS
     confusion_matrix = np.zeros(
-        (config.DATASET.NUM_CLASSES, config.DATASET.NUM_CLASSES, nums))
+        (config.DATASET.NUM_CLASSES, config.DATASET.NUM_CLASSES))
+    output_index = config.TEST.OUTPUT_INDEX
     with torch.no_grad():
-        for idx, batch in enumerate(testloader):
+        progress = tqdm(
+            enumerate(testloader),
+            total=len(testloader),
+            desc='Val {}/{}'.format(writer_dict['valid_global_steps'] + 1, '?'),
+            dynamic_ncols=True,
+            leave=False,
+        )
+        for idx, batch in progress:
             image, label, bd_gts, _, _ = batch
             size = label.size()
             image = image.cuda()
@@ -91,34 +121,34 @@ def validate(config, testloader, model, writer_dict):
             losses, pred, _, _ = model(image, label, bd_gts)
             if not isinstance(pred, (list, tuple)):
                 pred = [pred]
-            for i, x in enumerate(pred):
-                x = F.interpolate(
-                    input=x, size=size[-2:],
-                    mode='bilinear', align_corners=config.MODEL.ALIGN_CORNERS
-                )
 
-                confusion_matrix[..., i] += get_confusion_matrix(
-                    label,
-                    x,
-                    size,
-                    config.DATASET.NUM_CLASSES,
-                    config.TRAIN.IGNORE_LABEL
-                )
+            pred = pred[output_index]
+            pred = F.interpolate(
+                input=pred, size=size[-2:],
+                mode='bilinear', align_corners=config.MODEL.ALIGN_CORNERS
+            )
 
-            if idx % 10 == 0:
-                print(idx)
+            confusion_matrix += get_confusion_matrix(
+                label,
+                pred,
+                size,
+                config.DATASET.NUM_CLASSES,
+                config.TRAIN.IGNORE_LABEL
+            )
 
             loss = losses.mean()
             ave_loss.update(loss.item())
+            progress.set_postfix({
+                'loss': '{:.4f}'.format(ave_loss.average()),
+            })
 
-    for i in range(nums):
-        pos = confusion_matrix[..., i].sum(1)
-        res = confusion_matrix[..., i].sum(0)
-        tp = np.diag(confusion_matrix[..., i])
-        IoU_array = (tp / np.maximum(1.0, pos + res - tp))
-        mean_IoU = IoU_array.mean()
-        
-        logging.info('{} {} {}'.format(i, IoU_array, mean_IoU))
+    pos = confusion_matrix.sum(1)
+    res = confusion_matrix.sum(0)
+    tp = np.diag(confusion_matrix)
+    IoU_array = (tp / np.maximum(1.0, pos + res - tp))
+    mean_IoU = IoU_array.mean()
+
+    logging.info('{} {} {}'.format(output_index, IoU_array, mean_IoU))
 
     writer = writer_dict['writer']
     global_steps = writer_dict['valid_global_steps']

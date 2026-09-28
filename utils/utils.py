@@ -8,6 +8,7 @@ from __future__ import print_function
 
 import os
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -37,6 +38,8 @@ class FullModel(nn.Module):
   def forward(self, inputs, labels, bd_gt, *args, **kwargs):
     
     outputs = self.model(inputs, *args, **kwargs)
+    if not isinstance(outputs, (list, tuple)):
+        outputs = [outputs]
     
     h, w = labels.size(1), labels.size(2)
     ph, pw = outputs[0].size(2), outputs[0].size(3)
@@ -45,8 +48,14 @@ class FullModel(nn.Module):
             outputs[i] = F.interpolate(outputs[i], size=(
                 h, w), mode='bilinear', align_corners=config.MODEL.ALIGN_CORNERS)
 
-    acc  = self.pixel_acc(outputs[-2], labels)
-    loss_s = self.sem_loss(outputs[:-1], labels)
+    sem_outputs = outputs[:-1] if len(outputs) > 1 else outputs
+    acc = self.pixel_acc(sem_outputs[-1], labels)
+    loss_s = self.sem_loss(sem_outputs, labels)
+
+    if self.bd_loss is None:
+        zero = loss_s * 0.0
+        return torch.unsqueeze(loss_s, 0), sem_outputs, acc, [loss_s, zero]
+
     loss_b = self.bd_loss(outputs[-1], bd_gt)
 
     filler = torch.ones_like(labels) * config.TRAIN.IGNORE_LABEL
@@ -54,7 +63,7 @@ class FullModel(nn.Module):
     loss_sb = self.sem_loss(outputs[-2], bd_label)
     loss = loss_s + loss_b + loss_sb
 
-    return torch.unsqueeze(loss,0), outputs[:-1], acc, [loss_s, loss_b]
+    return torch.unsqueeze(loss,0), sem_outputs, acc, [loss_s, loss_b]
 
 
 class AverageMeter(object):
@@ -92,63 +101,105 @@ class AverageMeter(object):
     def average(self):
         return self.avg
 
-def create_logger(cfg, cfg_name, phase='train'):
+def _slug(value):
+    value = re.sub(r'[^a-zA-Z0-9._-]+', '-', str(value).strip())
+    return value.strip('-_.').lower()
+
+
+def _format_learning_rate(value):
+    return ('{:g}'.format(float(value))).replace('.', 'p').replace('-', 'm')
+
+
+def build_run_name(cfg, cfg_name, seed=None):
+    """Build a concise run name from the experiment's stable identity."""
+    model = _slug(cfg.MODEL.NAME).replace('_', '-')
+    cfg_stem = _slug(Path(cfg_name).stem)
+    dataset = 'sun15' if 'sunrgbd15' in cfg_stem else _slug(cfg.DATASET.DATASET)
+    input_suffix = '_rgbd' if getattr(cfg.MODEL, 'IN_CHANNELS', 3) == 4 else ''
+    initialization = 'img' if getattr(cfg.MODEL, 'PRETRAINED', '') else 'scratch'
+    seed_part = 's{}'.format(seed) if seed is not None and seed > 0 else 'sna'
+    lr_part = 'lr{}'.format(_format_learning_rate(cfg.TRAIN.LR))
+    # RGB-only run name kept for reference:
+    # return '{}_{}_{}_{}_{}'.format(
+    #     model, dataset, initialization, seed_part, lr_part)
+    return '{}_{}{}_{}_{}_{}'.format(
+        model, dataset, input_suffix, initialization, seed_part, lr_part)
+
+
+def _unique_run_dir(parent, run_name, timestamp):
+    candidate = parent / '{}_{}'.format(run_name, timestamp)
+    suffix = 2
+    while candidate.exists():
+        candidate = parent / '{}_{}-{:02d}'.format(run_name, timestamp, suffix)
+        suffix += 1
+    return candidate
+
+
+def create_logger(cfg, cfg_name, phase='train', run_name=None, seed=None,
+                  run_dir=None):
     root_output_dir = Path(cfg.OUTPUT_DIR)
-    # set up logger
-    if not root_output_dir.exists():
-        print('=> creating {}'.format(root_output_dir))
-        root_output_dir.mkdir()
+    root_log_dir = Path(cfg.LOG_DIR)
+    root_output_dir.mkdir(parents=True, exist_ok=True)
+    root_log_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = cfg.DATASET.DATASET
-    model = cfg.MODEL.NAME
     cfg_name = os.path.basename(cfg_name).split('.')[0]
+    data_root = str(getattr(cfg.DATASET, 'ROOT', '')).lower()
+    is_datamix = (
+        ('indoor_mix' in cfg_name.lower())
+        or ('datamix' in cfg_name.lower())
+        or ('indoor_mix' in data_root)
+        or ('datamix' in data_root)
+    )
 
-    final_output_dir = root_output_dir / dataset / cfg_name
+    time_str = time.strftime('%Y%m%d-%H%M%S')
+    if run_dir:
+        final_output_dir = Path(run_dir).expanduser()
+        if not final_output_dir.is_absolute():
+            final_output_dir = root_output_dir / final_output_dir
+    elif phase == 'train':
+        run_name = _slug(run_name) if run_name else build_run_name(
+            cfg, cfg_name, seed)
+        category = 'datamix' if is_datamix else dataset
+        final_output_dir = _unique_run_dir(
+            root_output_dir / category, run_name, time_str)
+    else:
+        # Keep evaluation compatible with legacy output locations. New runs
+        # normally pass TEST.MODEL_FILE explicitly.
+        final_output_dir = root_output_dir / dataset / cfg_name
 
-    print('=> creating {}'.format(final_output_dir))
     final_output_dir.mkdir(parents=True, exist_ok=True)
+    run_log_dir = final_output_dir / 'logs'
+    run_log_dir.mkdir(parents=True, exist_ok=True)
 
-    time_str = time.strftime('%Y-%m-%d-%H-%M')
-    log_file = '{}_{}_{}.log'.format(cfg_name, time_str, phase)
-    final_log_file = final_output_dir / log_file
+    final_log_file = run_log_dir / '{}.log'.format(phase)
     head = '%(asctime)-15s %(message)s'
     logging.basicConfig(filename=str(final_log_file),
-                        format=head)
+                        format=head,
+                        force=True)
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
-    console = logging.StreamHandler()
-    logging.getLogger('').addHandler(console)
 
-    tensorboard_log_dir = Path(cfg.LOG_DIR) / dataset / model / \
-            (cfg_name + '_' + time_str)
-    print('=> creating {}'.format(tensorboard_log_dir))
-    tensorboard_log_dir.mkdir(parents=True, exist_ok=True)
-
-    return logger, str(final_output_dir), str(tensorboard_log_dir)
+    return logger, str(final_output_dir), str(run_log_dir)
 
 def get_confusion_matrix(label, pred, size, num_class, ignore=-1):
     """
     Calcute the confusion matrix by given label and pred
     """
     output = pred.cpu().numpy().transpose(0, 2, 3, 1)
-    seg_pred = np.asarray(np.argmax(output, axis=3), dtype=np.uint8)
+    seg_pred = np.asarray(np.argmax(output, axis=3), dtype=np.int64)
     seg_gt = np.asarray(
-    label.cpu().numpy()[:, :size[-2], :size[-1]], dtype=np.int)
+    label.cpu().numpy()[:, :size[-2], :size[-1]], dtype=np.int64)
 
     ignore_index = seg_gt != ignore
     seg_gt = seg_gt[ignore_index]
     seg_pred = seg_pred[ignore_index]
 
-    index = (seg_gt * num_class + seg_pred).astype('int32')
-    label_count = np.bincount(index)
-    confusion_matrix = np.zeros((num_class, num_class))
-
-    for i_label in range(num_class):
-        for i_pred in range(num_class):
-            cur_index = i_label * num_class + i_pred
-            if cur_index < len(label_count):
-                confusion_matrix[i_label,
-                                 i_pred] = label_count[cur_index]
+    index = seg_gt * num_class + seg_pred
+    confusion_matrix = np.bincount(
+        index,
+        minlength=num_class * num_class
+    ).reshape(num_class, num_class)
     return confusion_matrix
 
 def adjust_learning_rate(optimizer, base_lr, max_iters, 

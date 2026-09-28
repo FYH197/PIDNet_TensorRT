@@ -65,6 +65,12 @@ class OhemCrossEntropy(nn.Module):
         pred = F.softmax(score, dim=1)
         pixel_losses = self.criterion(score, target).contiguous().view(-1)
         mask = target.contiguous().view(-1) != self.ignore_label
+        valid_pixel_losses = pixel_losses[mask]
+
+        # Boundary-guided labels can occasionally be all ignore_label early in training.
+        # Return a zero loss instead of indexing into an empty tensor and crashing.
+        if valid_pixel_losses.numel() == 0:
+            return score.sum() * 0.0
 
         tmp_target = target.clone()
         tmp_target[tmp_target == self.ignore_label] = 0
@@ -73,8 +79,10 @@ class OhemCrossEntropy(nn.Module):
         min_value = pred[min(self.min_kept, pred.numel() - 1)]
         threshold = max(min_value, self.thresh)
 
-        pixel_losses = pixel_losses[mask][ind]
+        pixel_losses = valid_pixel_losses[ind]
         pixel_losses = pixel_losses[pred < threshold]
+        if pixel_losses.numel() == 0:
+            return valid_pixel_losses.mean()
         return pixel_losses.mean()
 
     def forward(self, score, target):

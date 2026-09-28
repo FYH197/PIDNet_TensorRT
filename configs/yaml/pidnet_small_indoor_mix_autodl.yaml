@@ -1,0 +1,61 @@
+CUDNN:
+  BENCHMARK: true
+  DETERMINISTIC: false
+  ENABLED: true
+GPUS: (0,)
+OUTPUT_DIR: '/root/autodl-tmp/PIDnet_RT/output'
+LOG_DIR: '/root/autodl-tmp/PIDnet_RT/log'
+WORKERS: 4
+PRINT_FREQ: 10
+
+DATASET:
+  DATASET: indoor
+  ROOT: '/root/autodl-tmp/PIDnet_RT/PIDNet_TensorRT/data/indoor/'
+  TRAIN_SET: 'train_rare_boost.lst'
+  TEST_SET: 'val.lst'
+  NUM_CLASSES: 15
+
+MODEL:
+  NAME: pidnet_s
+  NUM_OUTPUTS: 2
+  PRETRAINED: 'torchvision://resnet18'
+
+LOSS:
+  USE_OHEM: true
+  USE_BOUNDARY: true
+  CLASS_BALANCE: true
+  OHEMTHRES: 0.9
+  OHEMKEEP: 131072
+  BALANCE_WEIGHTS: [0.4, 1.0]
+  SB_WEIGHTS: 1.0
+
+TRAIN:
+  IMAGE_SIZE:
+  - 640
+  - 480
+  BASE_SIZE: 640
+  BATCH_SIZE_PER_GPU: 68
+  SHUFFLE: true
+  BEGIN_EPOCH: 0
+  END_EPOCH: 180
+  RESUME: false
+  OPTIMIZER: sgd
+  LR: 0.01
+  WD: 0.0005
+  MOMENTUM: 0.9
+  NESTEROV: false
+  FLIP: true
+  MULTI_SCALE: true
+  IGNORE_LABEL: 255
+  SCALE_FACTOR: 16
+
+TEST:
+  IMAGE_SIZE:
+  - 640
+  - 480
+  BASE_SIZE: 640
+  BATCH_SIZE_PER_GPU: 1
+  FLIP_TEST: false
+  MULTI_SCALE: false
+  MODEL_FILE: ''
+  OUTPUT_INDEX: 1

@@ -1,0 +1,67 @@
+# PIDNet-S formal baseline for the custom SUNRGBD-15 paper split.
+# The official development pool is repartitioned 4227/1057 with seed 304;
+# the official 5050-sample test set remains isolated and unchanged.
+# Natural sampling only: no class weighting and no rare-class resampling.
+CUDNN:
+  BENCHMARK: true
+  DETERMINISTIC: false
+  ENABLED: true
+GPUS: (0,)
+OUTPUT_DIR: 'f:/PIDnet_RT/output'
+LOG_DIR: 'f:/PIDnet_RT/log'
+WORKERS: 2
+PRINT_FREQ: 10
+
+DATASET:
+  DATASET: indoor
+  # Previous project-local path: f:/PIDnet_RT/PIDNet_TensorRT/data/indoor/
+  ROOT: 'f:/SUNRGBD_Data/processed/'
+  TRAIN_SET: 'train.txt'
+  TEST_SET: 'val.txt'
+  NUM_CLASSES: 15
+
+MODEL:
+  NAME: pidnet_s
+  NUM_OUTPUTS: 2
+  PRETRAINED: 'f:/PIDnet_RT/PIDNet_TensorRT/pretrained_models/imagenet/PIDNet_S_ImageNet.pth.tar'
+
+LOSS:
+  USE_OHEM: true
+  USE_BOUNDARY: true
+  CLASS_BALANCE: false
+  OHEMTHRES: 0.9
+  OHEMKEEP: 131072
+  BALANCE_WEIGHTS: [0.4, 1.0]
+  SB_WEIGHTS: 1.0
+
+TRAIN:
+  IMAGE_SIZE:
+  - 640
+  - 480
+  BASE_SIZE: 640
+  BATCH_SIZE_PER_GPU: 44
+  SHUFFLE: true
+  BEGIN_EPOCH: 0
+  END_EPOCH: 300
+  RESUME: false
+  OPTIMIZER: sgd
+  LR: 0.01
+  WD: 0.0005
+  MOMENTUM: 0.9
+  NESTEROV: false
+  FLIP: true
+  MULTI_SCALE: true
+  IGNORE_LABEL: 255
+  SCALE_FACTOR: 16
+
+TEST:
+  IMAGE_SIZE:
+  - 640
+  - 480
+  BASE_SIZE: 640
+  BATCH_SIZE_PER_GPU: 1
+  VAL_INTERVAL: 5
+  FLIP_TEST: false
+  MULTI_SCALE: false
+  MODEL_FILE: ''
+  OUTPUT_INDEX: 1

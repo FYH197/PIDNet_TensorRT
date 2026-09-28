@@ -31,10 +31,14 @@ _C.MODEL.NAME = 'pidnet_s'
 _C.MODEL.PRETRAINED = 'pretrained_models/imagenet/PIDNet_S_ImageNet.pth.tar'
 _C.MODEL.ALIGN_CORNERS = True
 _C.MODEL.NUM_OUTPUTS = 2
+# RGB-only models historically used an implicit three-channel stem.
+# _C.MODEL.IN_CHANNELS = 3
+_C.MODEL.IN_CHANNELS = 3
 
 
 _C.LOSS = CN()
 _C.LOSS.USE_OHEM = True
+_C.LOSS.USE_BOUNDARY = True
 _C.LOSS.OHEMTHRES = 0.9
 _C.LOSS.OHEMKEEP = 100000
 _C.LOSS.CLASS_BALANCE = False
@@ -49,6 +53,11 @@ _C.DATASET.NUM_CLASSES = 19
 _C.DATASET.TRAIN_SET = 'list/cityscapes/train.lst'
 _C.DATASET.EXTRA_TRAIN_SET = ''
 _C.DATASET.TEST_SET = 'list/cityscapes/val.lst'
+# Depth statistics apply to depth_mm / DEPTH_SCALE_MM. They are overridden by
+# the SUNRGBD RGB-D experiment config after the training split is audited.
+_C.DATASET.DEPTH_SCALE_MM = 8000.0
+_C.DATASET.DEPTH_MEAN = 0.5
+_C.DATASET.DEPTH_STD = 0.25
 
 # training
 _C.TRAIN = CN()
@@ -84,6 +93,7 @@ _C.TEST.BATCH_SIZE_PER_GPU = 32
 _C.TEST.MODEL_FILE = ''
 _C.TEST.FLIP_TEST = False
 _C.TEST.MULTI_SCALE = False
+_C.TEST.VAL_INTERVAL = 1
 
 _C.TEST.OUTPUT_INDEX = -1
 

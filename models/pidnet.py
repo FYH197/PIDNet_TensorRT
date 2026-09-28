@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import time
+import os
 from .model_utils import BasicBlock, Bottleneck, segmenthead, DAPPM, PAPPM, PagFM, Bag, Light_Bag
 import logging
 
@@ -13,16 +14,127 @@ bn_mom = 0.1
 algc = False
 
 
+def _load_checkpoint_file(checkpoint_path):
+    try:
+        return torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    except TypeError:
+        # For older torch versions without the weights_only argument.
+        return torch.load(checkpoint_path, map_location='cpu')
+
+
+def _build_torchvision_resnet18():
+    try:
+        from torchvision.models import ResNet18_Weights, resnet18
+        return resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+    except Exception:
+        from torchvision.models import resnet18
+        return resnet18(pretrained=True)
+
+
+def _copy_prefix_weights(src_state, dst_state, src_prefix, dst_prefix):
+    loaded = {}
+    for key, value in src_state.items():
+        if not key.startswith(src_prefix):
+            continue
+        suffix = key[len(src_prefix):]
+        target_key = dst_prefix + suffix
+        if target_key in dst_state and dst_state[target_key].shape == value.shape:
+            loaded[target_key] = value
+    return loaded
+
+
+def _normalize_state_dict_keys(state_dict):
+    normalized = {}
+    for key, value in state_dict.items():
+        new_key = key
+        changed = True
+        while changed:
+            changed = False
+            for prefix in ('module.', 'model.'):
+                if new_key.startswith(prefix):
+                    new_key = new_key[len(prefix):]
+                    changed = True
+        normalized[new_key] = value
+    return normalized
+
+
+def _adapt_stem_input_weight(weight, target_shape):
+    """Adapt a three-channel pretrained stem to a four-channel RGB-D stem."""
+    if tuple(weight.shape) == tuple(target_shape):
+        return weight
+    if (
+        weight.ndim == 4
+        and len(target_shape) == 4
+        and weight.shape[0] == target_shape[0]
+        and weight.shape[1] == 3
+        and target_shape[1] == 4
+        and tuple(weight.shape[2:]) == tuple(target_shape[2:])
+    ):
+        adapted = weight.new_zeros(target_shape)
+        adapted[:, :3] = weight
+        adapted[:, 3:4] = weight.mean(dim=1, keepdim=True)
+        return adapted
+    return weight
+
+
+def load_imagenet_backbone(model):
+    resnet = _build_torchvision_resnet18()
+    src_state = resnet.state_dict()
+    dst_state = model.state_dict()
+    loaded = {}
+
+    # PIDNet-S uses a lighter two-3x3 stem, so only the first conv/bn can be partially initialized.
+    stem_conv_key = 'conv1.0.weight'
+    if stem_conv_key in dst_state and 'conv1.weight' in src_state:
+        dst_shape = dst_state[stem_conv_key].shape
+        src_weight = src_state['conv1.weight']
+        center = src_weight[:, :, 2:5, 2:5]
+        stem_weight = center[:dst_shape[0], :, :, :].contiguous()
+        stem_weight = _adapt_stem_input_weight(stem_weight, dst_shape)
+        if stem_weight.shape == dst_shape:
+            loaded[stem_conv_key] = stem_weight
+
+    for stat_name in ['weight', 'bias', 'running_mean', 'running_var']:
+        dst_bn_key = f'conv1.1.{stat_name}'
+        src_bn_key = f'bn1.{stat_name}'
+        if dst_bn_key in dst_state and src_bn_key in src_state:
+            loaded[dst_bn_key] = src_state[src_bn_key][:dst_state[dst_bn_key].shape[0]].contiguous()
+
+    # Map the closest matching ResNet stages into the compatible PIDNet backbone stages.
+    stage_pairs = [
+        ('layer1.', 'layer3_.'),
+        ('layer2.', 'layer3.'),
+        ('layer3.', 'layer4.'),
+        ('layer1.', 'layer4_.'),
+    ]
+    for src_prefix, dst_prefix in stage_pairs:
+        loaded.update(_copy_prefix_weights(src_state, dst_state, src_prefix, dst_prefix))
+
+    dst_state.update(loaded)
+    model.load_state_dict(dst_state, strict=False)
+
+    logging.info('Attention!!!')
+    logging.info('Loaded {} ImageNet backbone tensors from torchvision ResNet18.'.format(len(loaded)))
+    logging.info('Over!!!')
+    return model
+
+
 
 class PIDNet(nn.Module):
 
-    def __init__(self, m=2, n=3, num_classes=19, planes=64, ppm_planes=96, head_planes=128, augment=True):
+    # RGB-only signature kept for reference:
+    # def __init__(self, m=2, n=3, num_classes=19, planes=64,
+    #              ppm_planes=96, head_planes=128, augment=True):
+    def __init__(self, m=2, n=3, num_classes=19, planes=64, ppm_planes=96,
+                 head_planes=128, augment=True, in_channels=3):
         super(PIDNet, self).__init__()
         self.augment = augment
         
         # I Branch
         self.conv1 =  nn.Sequential(
-                          nn.Conv2d(3,planes,kernel_size=3, stride=2, padding=1),
+                          # RGB-only stem kept for reference:
+                          # nn.Conv2d(3,planes,kernel_size=3, stride=2, padding=1),
+                          nn.Conv2d(in_channels,planes,kernel_size=3, stride=2, padding=1),
                           BatchNorm2d(planes, momentum=bn_mom),
                           nn.ReLU(inplace=True),
                           nn.Conv2d(planes,planes,kernel_size=3, stride=2, padding=1),
@@ -135,11 +247,8 @@ class PIDNet(nn.Module):
 
     def forward(self, x):
         torch.cuda.nvtx.range_push("stage1")
-        # width_output = x.shape[-1] // 8
-        # height_output = x.shape[-2] // 8
-        # print("width and height: ", width_output, height_output)
-        width_output = 256
-        height_output = 128
+        width_output = x.shape[-1] // 8
+        height_output = x.shape[-2] // 8
         x = self.conv1(x)
         x = self.layer1(x)
         x = self.relu(self.layer2(self.relu(x)))
@@ -196,17 +305,39 @@ class PIDNet(nn.Module):
             return x_      
 
 def get_seg_model(cfg, imgnet_pretrained):
-    
+    in_channels = getattr(cfg.MODEL, 'IN_CHANNELS', 3)
     if 's' in cfg.MODEL.NAME:
-        model = PIDNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=32, ppm_planes=96, head_planes=128, augment=True)
+        # RGB-only construction kept for reference:
+        # model = PIDNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=32, ppm_planes=96, head_planes=128, augment=True)
+        model = PIDNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=32, ppm_planes=96, head_planes=128, augment=True, in_channels=in_channels)
     elif 'm' in cfg.MODEL.NAME:
-        model = PIDNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, ppm_planes=96, head_planes=128, augment=True)
+        # RGB-only construction kept for reference:
+        # model = PIDNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, ppm_planes=96, head_planes=128, augment=True)
+        model = PIDNet(m=2, n=3, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, ppm_planes=96, head_planes=128, augment=True, in_channels=in_channels)
     else:
-        model = PIDNet(m=3, n=4, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, ppm_planes=112, head_planes=256, augment=True)
-    
+        # RGB-only construction kept for reference:
+        # model = PIDNet(m=3, n=4, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, ppm_planes=112, head_planes=256, augment=True)
+        model = PIDNet(m=3, n=4, num_classes=cfg.DATASET.NUM_CLASSES, planes=64, ppm_planes=112, head_planes=256, augment=True, in_channels=in_channels)
+
+    if cfg.MODEL.PRETRAINED == 'torchvision://resnet18':
+        return load_imagenet_backbone(model)
+
+    if not cfg.MODEL.PRETRAINED or not os.path.isfile(cfg.MODEL.PRETRAINED):
+        logging.info('Attention!!!')
+        logging.info('No pretrained weights found, training will start from random initialization.')
+        logging.info('Over!!!')
+        return model
+
+    checkpoint = _load_checkpoint_file(cfg.MODEL.PRETRAINED)
+
     if imgnet_pretrained:
-        pretrained_state = torch.load(cfg.MODEL.PRETRAINED, map_location='cpu')['state_dict'] 
+        pretrained_state = checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
         model_dict = model.state_dict()
+        stem_key = 'conv1.0.weight'
+        if stem_key in pretrained_state and stem_key in model_dict:
+            pretrained_state[stem_key] = _adapt_stem_input_weight(
+                pretrained_state[stem_key], model_dict[stem_key].shape
+            )
         pretrained_state = {k: v for k, v in pretrained_state.items() if (k in model_dict and v.shape == model_dict[k].shape)}
         model_dict.update(pretrained_state)
         msg = 'Loaded {} parameters!'.format(len(pretrained_state))
@@ -215,11 +346,12 @@ def get_seg_model(cfg, imgnet_pretrained):
         logging.info('Over!!!')
         model.load_state_dict(model_dict, strict = False)
     else:
-        pretrained_dict = torch.load(cfg.MODEL.PRETRAINED, map_location='cpu')
+        pretrained_dict = checkpoint
         if 'state_dict' in pretrained_dict:
             pretrained_dict = pretrained_dict['state_dict']
+        pretrained_dict = _normalize_state_dict_keys(pretrained_dict)
         model_dict = model.state_dict()
-        pretrained_dict = {k[6:]: v for k, v in pretrained_dict.items() if (k[6:] in model_dict and v.shape == model_dict[k[6:]].shape)}
+        pretrained_dict = {k: v for k, v in pretrained_dict.items() if (k in model_dict and v.shape == model_dict[k].shape)}
         msg = 'Loaded {} parameters!'.format(len(pretrained_dict))
         logging.info('Attention!!!')
         logging.info(msg)
@@ -229,14 +361,19 @@ def get_seg_model(cfg, imgnet_pretrained):
     
     return model
 
-def get_pred_model(name, num_classes):
-    
+# RGB-only signature kept for reference:
+# def get_pred_model(name, num_classes):
+def get_pred_model(name, num_classes, in_channels=3):
+    # RGB-only calls can omit in_channels; RGB-D callers pass in_channels=4.
     if 's' in name:
-        model = PIDNet(m=2, n=3, num_classes=num_classes, planes=32, ppm_planes=96, head_planes=128, augment=False)
+        # model = PIDNet(m=2, n=3, num_classes=num_classes, planes=32, ppm_planes=96, head_planes=128, augment=False)
+        model = PIDNet(m=2, n=3, num_classes=num_classes, planes=32, ppm_planes=96, head_planes=128, augment=False, in_channels=in_channels)
     elif 'm' in name:
-        model = PIDNet(m=2, n=3, num_classes=num_classes, planes=64, ppm_planes=96, head_planes=128, augment=False)
+        # model = PIDNet(m=2, n=3, num_classes=num_classes, planes=64, ppm_planes=96, head_planes=128, augment=False)
+        model = PIDNet(m=2, n=3, num_classes=num_classes, planes=64, ppm_planes=96, head_planes=128, augment=False, in_channels=in_channels)
     else:
-        model = PIDNet(m=3, n=4, num_classes=num_classes, planes=64, ppm_planes=112, head_planes=256, augment=False)
+        # model = PIDNet(m=3, n=4, num_classes=num_classes, planes=64, ppm_planes=112, head_planes=256, augment=False)
+        model = PIDNet(m=3, n=4, num_classes=num_classes, planes=64, ppm_planes=112, head_planes=256, augment=False, in_channels=in_channels)
     
     return model
 

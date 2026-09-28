@@ -59,8 +59,12 @@ class BaseDataset(data.Dataset):
 
     def rand_crop(self, image, label, edge):
         h, w = image.shape[:-1]
+        # RGB-only padding kept for reference:
+        # image = self.pad_image(image, h, w, self.crop_size,
+        #                        (0.0, 0.0, 0.0))
+        image_pad_value = tuple(0.0 for _ in range(image.shape[2]))
         image = self.pad_image(image, h, w, self.crop_size,
-                               (0.0, 0.0, 0.0))
+                               image_pad_value)
         label = self.pad_image(label, h, w, self.crop_size,
                                (self.ignore_label,))
         edge = self.pad_image(edge, h, w, self.crop_size,

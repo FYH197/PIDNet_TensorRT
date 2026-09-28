@@ -29,7 +29,9 @@ def parse_args():
     
     parser.add_argument('--cfg',
                         help='experiment configure file name',
-                        default="experiments/cityscapes/pidnet_small_cityscapes.yaml",
+                        # Previous RGB-only default kept for reference:
+                        # default="experiments/cityscapes/pidnet_small_cityscapes.yaml",
+                        default=r"f:\PIDnet_RT\PIDNet_TensorRT\configs\yaml\pidnet_s_sunrgbd15_rgbd_4227_1057.yaml",
                         type=str)
     parser.add_argument('opts',
                         help="Modify config options using the command-line",
@@ -61,7 +63,9 @@ def main():
     if config.TEST.MODEL_FILE:
         model_state_file = config.TEST.MODEL_FILE
     else:
-        model_state_file = os.path.join(final_output_dir, 'best.pt')      
+        model_state_file = os.path.join(final_output_dir, 'best_miou.pth')
+        if not os.path.isfile(model_state_file):
+            model_state_file = os.path.join(final_output_dir, 'best.pt')
    
     logger.info('=> loading model from {}'.format(model_state_file))
         
